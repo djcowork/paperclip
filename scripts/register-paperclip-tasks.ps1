@@ -34,6 +34,21 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# Log everything to a file so the elevated window's output survives even if
+# the window closes before the user can read it.
+$logDir = "D:\paperclip\tmp"
+if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
+$logPath = Join-Path $logDir ("register-tasks-" + (Get-Date -Format "yyyyMMdd-HHmmss") + ".log")
+try { Start-Transcript -Path $logPath -Force | Out-Null } catch { }
+trap {
+  Write-Host "FATAL: $_" -ForegroundColor Red
+  Write-Host $_.ScriptStackTrace -ForegroundColor DarkRed
+  try { Stop-Transcript | Out-Null } catch { }
+  # keep window open for 30 s so user can read the error
+  Start-Sleep -Seconds 30
+  exit 1
+}
+
 function Test-Admin {
   $current = [Security.Principal.WindowsIdentity]::GetCurrent()
   $principal = New-Object Security.Principal.WindowsPrincipal($current)
@@ -62,10 +77,10 @@ function Register-Task {
   param(
     [string]$Name,
     [string]$Exe,
-    [string]$Args,
+    [string]$ArgString,    # NOTE: must not be named $Args — that is a reserved automatic variable in PS
     [string]$Description
   )
-  $action = New-ScheduledTaskAction -Execute $Exe -Argument $Args -WorkingDirectory $Repo
+  $action = New-ScheduledTaskAction -Execute $Exe -Argument $ArgString -WorkingDirectory $Repo
   $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Highest
   $settings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
@@ -87,12 +102,12 @@ Write-Host "  PowerShell host: $pwsh"
 
 Register-Task -Name "paperclip-start" `
   -Exe $pwsh `
-  -Args ('-NoProfile -ExecutionPolicy Bypass -File "{0}"' -f $startScript) `
+  -ArgString ('-NoProfile -ExecutionPolicy Bypass -File "{0}"' -f $startScript) `
   -Description "Start the paperclip server (paperclipai run --instance default)."
 
 Register-Task -Name "paperclip-stop" `
   -Exe $pwsh `
-  -Args ('-NoProfile -ExecutionPolicy Bypass -File "{0}"' -f $stopScript) `
+  -ArgString ('-NoProfile -ExecutionPolicy Bypass -File "{0}"' -f $stopScript) `
   -Description "Stop the paperclip server tree."
 
 # Smoke test runs the bash script via Git Bash (always present alongside gh).
@@ -106,7 +121,7 @@ if (-not $bashExe) {
 }
 Register-Task -Name "paperclip-smoke" `
   -Exe $bashExe `
-  -Args ('-c "{0}"' -f ($smokeScript -replace '\\','/')) `
+  -ArgString ('-c "{0}"' -f ($smokeScript -replace '\\','/')) `
   -Description "Create a smoke issue + invoke heartbeat against Delivery Lead, print result."
 
 Write-Host ""
@@ -117,7 +132,7 @@ function New-Shortcut {
   param(
     [string]$Path,
     [string]$Target,
-    [string]$Args,
+    [string]$ArgString,     # again, do not name this $Args
     [string]$IconLocation = "",
     [string]$Hotkey = "",
     [string]$Description = ""
@@ -125,7 +140,7 @@ function New-Shortcut {
   $wsh = New-Object -ComObject WScript.Shell
   $lnk = $wsh.CreateShortcut($Path)
   $lnk.TargetPath = $Target
-  $lnk.Arguments = $Args
+  $lnk.Arguments = $ArgString
   if ($IconLocation) { $lnk.IconLocation = $IconLocation }
   if ($Description)  { $lnk.Description = $Description }
   if ($Hotkey)       { $lnk.Hotkey = $Hotkey }
@@ -138,21 +153,21 @@ $schtasks = "C:\Windows\System32\schtasks.exe"
 
 New-Shortcut -Path (Join-Path $desktop "Paperclip Start.lnk") `
   -Target $schtasks `
-  -Args "/Run /TN paperclip-start" `
+  -ArgString "/Run /TN paperclip-start" `
   -IconLocation "shell32.dll,137" `
   -Hotkey $StartHotkey `
   -Description "Start the paperclip server. Hotkey: $StartHotkey"
 
 New-Shortcut -Path (Join-Path $desktop "Paperclip Stop.lnk") `
   -Target $schtasks `
-  -Args "/Run /TN paperclip-stop" `
+  -ArgString "/Run /TN paperclip-stop" `
   -IconLocation "shell32.dll,131" `
   -Hotkey $StopHotkey `
   -Description "Stop the paperclip server. Hotkey: $StopHotkey"
 
 New-Shortcut -Path (Join-Path $desktop "Paperclip Smoke.lnk") `
   -Target $schtasks `
-  -Args "/Run /TN paperclip-smoke" `
+  -ArgString "/Run /TN paperclip-smoke" `
   -IconLocation "shell32.dll,167" `
   -Hotkey $SmokeHotkey `
   -Description "Run the heartbeat smoke against djcowork2.0. Hotkey: $SmokeHotkey"
@@ -174,3 +189,8 @@ Write-Host "  $SmokeHotkey  →  paperclip-smoke"
 Write-Host ""
 Write-Host "To uninstall:"
 Write-Host "  scripts\unregister-paperclip-tasks.ps1  (also requires admin)"
+
+try { Stop-Transcript | Out-Null } catch { }
+# brief pause so the user can confirm visually if the window was launched
+# from an elevated double-click rather than the parent shell.
+Start-Sleep -Seconds 4
