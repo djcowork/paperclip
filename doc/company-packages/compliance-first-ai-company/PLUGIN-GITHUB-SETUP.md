@@ -420,8 +420,10 @@ queue。
 queue**。具体步骤在
 `doc/plans/2026-05-14-djcowork2-github-hardening.md` PR 7。
 
-或者临时把 plugin instance 的 `mergeQueueEnabled` 设成 `false` —— 这样
-plugin 给的 refusal code 会更明确（运营者层面禁用），方便区分。
+不要在 `djcowork/djcowork2.0` 的合规实例里把
+`mergeQueueEnabled` 持久化为 `false`。这个字段留空默认就是 `true`；
+如果临时/测试实例必须禁用，先在对应 issue comment 里写明实例名、仓库、
+原因、恢复步骤和恢复 owner，再改那个非合规实例的配置。
 
 ---
 
