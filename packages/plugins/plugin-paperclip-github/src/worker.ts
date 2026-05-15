@@ -8,11 +8,19 @@ import {
 import { resolveConfig, type ResolvedConfig } from "./config.js";
 import { createGitHubClient, type GitHubClient } from "./auth.js";
 import { wrapTool } from "./audit.js";
-import { TOOL } from "./manifest.js";
-import { openPr, getPr } from "./tools/pr.js";
+import { ISSUE_TOOL_SCHEMA, TOOL } from "./manifest.js";
+import {
+  openPr,
+  getPr,
+  updatePrBody,
+  convertPrToDraft,
+  markPrReadyForReview,
+  repairPrHead,
+} from "./tools/pr.js";
 import { getCheckRuns, createCheckRun } from "./tools/checks.js";
 import { enqueueMerge } from "./tools/merge.js";
 import { listIssues } from "./tools/issues.js";
+import { createIssue, updateIssue, labelIssue } from "./tools/issue_mutations.js";
 
 /**
  * Worker entrypoint for the paperclip GitHub plugin.
@@ -161,6 +169,97 @@ function registerTools(ctx: PluginContext): void {
       return listIssues(s.client, params, runCtx);
     }),
   );
+
+  ctx.tools.register(
+    TOOL.CREATE_ISSUE,
+    {
+      displayName: "Create Issue",
+      description: "Create a GitHub issue in the configured repository with readback.",
+      parametersSchema: ISSUE_TOOL_SCHEMA.CREATE,
+    },
+    wrap(TOOL.CREATE_ISSUE, async (params, runCtx) => {
+      const s = requireState();
+      return createIssue(s.client, params, runCtx);
+    }),
+  );
+
+  ctx.tools.register(
+    TOOL.UPDATE_ISSUE,
+    {
+      displayName: "Update Issue",
+      description: "Update a GitHub issue title, body, or state with readback.",
+      parametersSchema: ISSUE_TOOL_SCHEMA.UPDATE,
+    },
+    wrap(TOOL.UPDATE_ISSUE, async (params, runCtx) => {
+      const s = requireState();
+      return updateIssue(s.client, params, runCtx);
+    }),
+  );
+
+  ctx.tools.register(
+    TOOL.LABEL_ISSUE,
+    {
+      displayName: "Label Issue",
+      description: "Apply labels to a GitHub issue and verify label readback.",
+      parametersSchema: ISSUE_TOOL_SCHEMA.LABEL,
+    },
+    wrap(TOOL.LABEL_ISSUE, async (params, runCtx) => {
+      const s = requireState();
+      return labelIssue(s.client, params, runCtx);
+    }),
+  );
+
+  ctx.tools.register(
+    TOOL.UPDATE_PR_BODY,
+    {
+      displayName: "Update Pull Request Body",
+      description: "Update an existing PR body with expected head/base guards and readback.",
+      parametersSchema: updatePrBodySchema,
+    },
+    wrap(TOOL.UPDATE_PR_BODY, async (params, runCtx) => {
+      const s = requireState();
+      return updatePrBody(s.client, params, runCtx);
+    }),
+  );
+
+  ctx.tools.register(
+    TOOL.CONVERT_PR_TO_DRAFT,
+    {
+      displayName: "Convert Pull Request To Draft",
+      description: "Convert an existing PR to draft with expected head/base guards and readback.",
+      parametersSchema: prMutationGuardSchema,
+    },
+    wrap(TOOL.CONVERT_PR_TO_DRAFT, async (params, runCtx) => {
+      const s = requireState();
+      return convertPrToDraft(s.client, params, runCtx);
+    }),
+  );
+
+  ctx.tools.register(
+    TOOL.MARK_PR_READY_FOR_REVIEW,
+    {
+      displayName: "Mark Pull Request Ready For Review",
+      description: "Mark an existing PR ready for review with expected head/base guards and readback.",
+      parametersSchema: prMutationGuardSchema,
+    },
+    wrap(TOOL.MARK_PR_READY_FOR_REVIEW, async (params, runCtx) => {
+      const s = requireState();
+      return markPrReadyForReview(s.client, params, runCtx);
+    }),
+  );
+
+  ctx.tools.register(
+    TOOL.REPAIR_PR_HEAD,
+    {
+      displayName: "Repair Pull Request Head",
+      description: "Update an existing PR head branch with expected head/base guards and readback.",
+      parametersSchema: repairPrHeadSchema,
+    },
+    wrap(TOOL.REPAIR_PR_HEAD, async (params, runCtx) => {
+      const s = requireState();
+      return repairPrHead(s.client, params, runCtx);
+    }),
+  );
 }
 
 // Schemas duplicated from manifest.ts so worker registration is independent
@@ -219,6 +318,40 @@ const listIssuesSchema = {
     since: { type: "string" },
     perPage: { type: "number" },
   },
+} as const;
+
+const prMutationGuardProperties = {
+  repository: { type: "string" },
+  prNumber: { type: "number" },
+  expectedHeadSha: { type: "string" },
+  expectedBaseSha: { type: "string" },
+} as const;
+
+const prMutationGuardSchema = {
+  type: "object",
+  properties: prMutationGuardProperties,
+  required: ["repository", "prNumber", "expectedHeadSha", "expectedBaseSha"],
+} as const;
+
+const updatePrBodySchema = {
+  type: "object",
+  properties: {
+    ...prMutationGuardProperties,
+    body: { type: "string" },
+    expectedCurrentBody: { type: "string" },
+  },
+  required: ["repository", "prNumber", "expectedHeadSha", "expectedBaseSha", "body"],
+} as const;
+
+const repairPrHeadSchema = {
+  type: "object",
+  properties: {
+    ...prMutationGuardProperties,
+    targetHeadSha: { type: "string" },
+    sourceRepository: { type: "string" },
+    force: { type: "boolean" },
+  },
+  required: ["repository", "prNumber", "expectedHeadSha", "expectedBaseSha", "targetHeadSha"],
 } as const;
 
 export default plugin;
