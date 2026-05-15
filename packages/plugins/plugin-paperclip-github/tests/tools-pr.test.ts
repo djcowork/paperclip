@@ -2,6 +2,8 @@ import { describe, it, expect, vi } from "vitest";
 import {
   openPr,
   getPr,
+  updatePr,
+  closePr,
   updatePrBody,
   convertPrToDraft,
   markPrReadyForReview,
@@ -46,10 +48,12 @@ function makeFakeClient(overrides: Record<string, unknown> = {}): GitHubClient {
 }
 
 interface FakePrState {
+  title?: string;
   body?: string;
   draft?: boolean;
   headSha?: string;
   baseSha?: string;
+  baseRef?: string;
   headRef?: string;
   headRepository?: string;
   state?: string;
@@ -57,10 +61,12 @@ interface FakePrState {
 
 function makePrMutationClient(initial: FakePrState = {}): GitHubClient {
   const state = {
+    title: initial.title ?? "Old title",
     body: initial.body ?? "old body",
     draft: initial.draft ?? false,
     headSha: initial.headSha ?? headSha,
     baseSha: initial.baseSha ?? baseSha,
+    baseRef: initial.baseRef ?? "main",
     headRef: initial.headRef ?? "codex/com-168",
     headRepository: initial.headRepository ?? "owner/repo",
     state: initial.state ?? "open",
@@ -69,6 +75,7 @@ function makePrMutationClient(initial: FakePrState = {}): GitHubClient {
     number: 42,
     html_url: "https://github.com/owner/repo/pull/42",
     state: state.state,
+    title: state.title,
     draft: state.draft,
     body: state.body,
     head: {
@@ -76,7 +83,7 @@ function makePrMutationClient(initial: FakePrState = {}): GitHubClient {
       ref: state.headRef,
       repo: { full_name: state.headRepository },
     },
-    base: { sha: state.baseSha },
+    base: { sha: state.baseSha, ref: state.baseRef },
   });
   const graphql = vi.fn().mockImplementation(async (query: string) => {
     if (query.includes("pullRequest(number:")) {
@@ -99,10 +106,16 @@ function makePrMutationClient(initial: FakePrState = {}): GitHubClient {
     rest: {
       pulls: {
         get: vi.fn().mockImplementation(async () => ({ data: prData() })),
-        update: vi.fn().mockImplementation(async ({ body }: { body: string }) => {
-          state.body = body;
+        update: vi.fn().mockImplementation(async (params: { title?: string; body?: string; state?: string; base?: string }) => {
+          if (params.title !== undefined) state.title = params.title;
+          if (params.body !== undefined) state.body = params.body;
+          if (params.state !== undefined) state.state = params.state;
+          if (params.base !== undefined) state.baseRef = params.base;
           return { data: prData() };
         }),
+      },
+      issues: {
+        createComment: vi.fn().mockResolvedValue({ data: { id: 123 } }),
       },
       git: {
         getCommit: vi.fn().mockResolvedValue({ data: { sha: targetSha } }),
@@ -212,7 +225,9 @@ describe("getPr", () => {
                       nodes: [
                         { __typename: "CheckRun", name: "quality / cargo-test", conclusion: "SUCCESS", status: "COMPLETED" },
                         { __typename: "CheckRun", name: "quality / cargo-clippy", conclusion: "FAILURE", status: "COMPLETED" },
+                        { __typename: "CheckRun", name: "quality / still-running", conclusion: null, status: "IN_PROGRESS" },
                         { __typename: "StatusContext", context: "windows-desktop-gate", state: "SUCCESS" },
+                        { __typename: "StatusContext", context: "pending-status", state: "PENDING" },
                       ],
                     },
                   },
@@ -231,6 +246,7 @@ describe("getPr", () => {
       state: string;
       passingChecks: string[];
       failingChecks: string[];
+      allChecks: string[];
       reviewDecision: string | null;
       mergeable: boolean | null;
     };
@@ -238,6 +254,7 @@ describe("getPr", () => {
     expect(data.mergeable).toBe(true);
     expect(data.passingChecks).toEqual(["quality / cargo-test", "windows-desktop-gate"]);
     expect(data.failingChecks).toEqual(["quality / cargo-clippy"]);
+    expect(data.allChecks).toEqual(["quality / cargo-test", "windows-desktop-gate", "quality / cargo-clippy"]);
     expect(data.reviewDecision).toBe("APPROVED");
   });
 
@@ -263,6 +280,114 @@ describe("getPr", () => {
 });
 
 describe("PR mutation tools", () => {
+  it("updates an existing PR title and body only after guard and readback", async () => {
+    const client = makePrMutationClient({ title: "Old title", body: "old body" });
+    const result = await updatePr(
+      client,
+      mutationGuard({
+        title: "New title",
+        body: "new body",
+        expectedCurrentTitle: "Old title",
+        expectedCurrentBody: "old body",
+      }),
+      runCtx,
+    );
+    expect(result.error).toBeUndefined();
+    const data = result.data as {
+      mutation: string;
+      verified: boolean;
+      changed: boolean;
+      title: string;
+      state: string;
+      actor: { agentId: string; runId: string };
+    };
+    expect(data.mutation).toBe("update_pr");
+    expect(data.verified).toBe(true);
+    expect(data.changed).toBe(true);
+    expect(data.title).toBe("New title");
+    expect(data.state).toBe("open");
+    expect(data.actor).toEqual({ agentId: "a", runId: "r" });
+    expect((client.rest as never as { pulls: { update: ReturnType<typeof vi.fn> } }).pulls.update).toHaveBeenCalledWith(
+      expect.objectContaining({ pull_number: 42, title: "New title", body: "new body" }),
+    );
+  });
+
+  it("updates an existing PR base branch only after guard and readback", async () => {
+    const client = makePrMutationClient({ baseRef: "main" });
+    const result = await updatePr(client, mutationGuard({ base: "develop" }), runCtx);
+    expect(result.error).toBeUndefined();
+    const data = result.data as { mutation: string; verified: boolean; changed: boolean; baseRef: string };
+    expect(data.mutation).toBe("update_pr");
+    expect(data.verified).toBe(true);
+    expect(data.changed).toBe(true);
+    expect(data.baseRef).toBe("develop");
+    expect((client.rest as never as { pulls: { update: ReturnType<typeof vi.fn> } }).pulls.update).toHaveBeenCalledWith(
+      expect.objectContaining({ pull_number: 42, base: "develop" }),
+    );
+  });
+
+  it("refuses general PR update when title/body/base are omitted", async () => {
+    const client = makePrMutationClient();
+    await expect(updatePr(client, mutationGuard(), runCtx)).rejects.toThrow(/title, body, or base required/);
+  });
+
+  it("refuses general PR update when expected body changed", async () => {
+    const client = makePrMutationClient({ body: "newer body" });
+    await expect(
+      updatePr(client, mutationGuard({ body: "replacement", expectedCurrentBody: "old body" }), runCtx),
+    ).rejects.toThrow(/expected_body_mismatch/);
+  });
+
+  it("closes an existing PR only after guard and readback", async () => {
+    const client = makePrMutationClient({ state: "open" });
+    const result = await closePr(
+      client,
+      mutationGuard({ reason: "superseded by PR #600", commentBody: "Replacement branch passed review." }),
+      runCtx,
+    );
+    expect(result.error).toBeUndefined();
+    const data = result.data as {
+      mutation: string;
+      verified: boolean;
+      changed: boolean;
+      state: string;
+      actor: { agentId: string; runId: string };
+    };
+    expect(data.mutation).toBe("close_pr");
+    expect(data.verified).toBe(true);
+    expect(data.changed).toBe(true);
+    expect(data.state).toBe("closed");
+    expect(data.actor).toEqual({ agentId: "a", runId: "r" });
+    const createComment = (client.rest as never as { issues: { createComment: ReturnType<typeof vi.fn> } }).issues.createComment;
+    expect(createComment).toHaveBeenCalledWith(
+      expect.objectContaining({
+        issue_number: 42,
+        body: expect.stringContaining("Reason: superseded by PR #600"),
+      }),
+    );
+    expect(createComment.mock.calls[0]?.[0]?.body).toContain("Agent: a");
+    expect(createComment.mock.calls[0]?.[0]?.body).toContain("Run: r");
+    expect(createComment.mock.calls[0]?.[0]?.body).not.toMatch(/\n{3,}/);
+    expect((client.rest as never as { pulls: { update: ReturnType<typeof vi.fn> } }).pulls.update).toHaveBeenCalledWith(
+      expect.objectContaining({ pull_number: 42, state: "closed" }),
+    );
+  });
+
+  it("refuses to close a PR without an explicit reason", async () => {
+    const client = makePrMutationClient();
+    await expect(closePr(client, mutationGuard(), runCtx)).rejects.toThrow(/reason required/);
+  });
+
+  it("refuses to close a PR whose expected base does not match readback", async () => {
+    const client = makePrMutationClient({ baseSha: targetSha });
+    await expect(closePr(client, mutationGuard({ reason: "superseded" }), runCtx)).rejects.toThrow(/expected_base_mismatch/);
+  });
+
+  it("refuses to close an already closed PR", async () => {
+    const client = makePrMutationClient({ state: "closed" });
+    await expect(closePr(client, mutationGuard({ reason: "superseded" }), runCtx)).rejects.toThrow(/pr_not_open/);
+  });
+
   it("updates an existing PR body only after head/base guard and readback", async () => {
     const client = makePrMutationClient({ body: "old body" });
     const result = await updatePrBody(

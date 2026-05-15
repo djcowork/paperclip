@@ -18,6 +18,8 @@ export const TOOL = {
   CREATE_ISSUE: "github_create_issue",
   UPDATE_ISSUE: "github_update_issue",
   LABEL_ISSUE: "github_label_issue",
+  UPDATE_PR: "github_update_pr",
+  CLOSE_PR: "github_close_pr",
   UPDATE_PR_BODY: "github_update_pr_body",
   CONVERT_PR_TO_DRAFT: "github_convert_pr_to_draft",
   MARK_PR_READY_FOR_REVIEW: "github_mark_pr_ready_for_review",
@@ -171,6 +173,39 @@ const manifest: PaperclipPluginManifestV1 = {
       description:
         "Apply labels to an existing GitHub issue in the configured repository, then read it back to prove labels are present.",
       parametersSchema: ISSUE_TOOL_SCHEMA.LABEL,
+    },
+    {
+      name: TOOL.UPDATE_PR,
+      displayName: "Update Pull Request",
+      description:
+        "Update an existing PR title, body, and/or base branch after verifying repository, PR number, current head SHA, current base SHA, and optional current title/body readback.",
+      parametersSchema: {
+        type: "object",
+        properties: {
+          ...mutationGuardProperties(),
+          title: { type: "string" },
+          body: { type: "string" },
+          base: { type: "string", description: "New base branch name. Raw refs are rejected." },
+          expectedCurrentTitle: { type: "string" },
+          expectedCurrentBody: { type: "string" },
+        },
+        required: ["repository", "prNumber", "expectedHeadSha", "expectedBaseSha"],
+      },
+    },
+    {
+      name: TOOL.CLOSE_PR,
+      displayName: "Close Pull Request",
+      description:
+        "Close an existing PR after verifying repository, PR number, current head SHA, current base SHA, writing an audit comment with reason/run metadata, and state readback.",
+      parametersSchema: {
+        type: "object",
+        properties: {
+          ...mutationGuardProperties(),
+          reason: { type: "string", description: "Explicit disposal reason recorded in the PR comment trail." },
+          commentBody: { type: "string", description: "Optional additional operator-readable close note." },
+        },
+        required: ["repository", "prNumber", "expectedHeadSha", "expectedBaseSha", "reason"],
+      },
     },
     {
       name: TOOL.UPDATE_PR_BODY,
