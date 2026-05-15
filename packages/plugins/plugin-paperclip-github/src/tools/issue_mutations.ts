@@ -48,6 +48,7 @@ export async function updateIssue(client: GitHubClient, params: unknown, _ctx: T
   const state = readState(p);
   if (title === undefined && body === undefined && state === undefined) throw new Error("title, body, or state required");
 
+  await readIssue(client, issueNumber);
   await githubCall(
     () =>
       client.rest.issues.update({

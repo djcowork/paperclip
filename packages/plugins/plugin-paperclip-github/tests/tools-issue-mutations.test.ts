@@ -54,4 +54,18 @@ describe("issue mutation tools", () => {
     expect(labeled.data).toMatchObject({ issueNumber: 7, mutation: "label_issue", verified: true });
     expect((labeled.data as { labels: string[] }).labels).toEqual(expect.arrayContaining(["delivery-approved", "merge-follow-up"]));
   });
+
+  it("refuses pull request numbers before mutating through the issues endpoint", async () => {
+    const c = client();
+    const issues = (c.rest as never as { issues: { get: ReturnType<typeof vi.fn>; update: ReturnType<typeof vi.fn> } })
+      .issues;
+    issues.get.mockResolvedValueOnce({
+      data: row({ pull_request: { url: "https://api.github.com/repos/o/r/pulls/7" } }),
+    });
+
+    await expect(updateIssue(c, { issueNumber: 7, title: "do not touch PR" }, runCtx)).rejects.toThrow(
+      "#7 is a pull request, not an issue",
+    );
+    expect(issues.update).not.toHaveBeenCalled();
+  });
 });
